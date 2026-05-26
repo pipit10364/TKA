@@ -1,4 +1,15 @@
 import { useState, useEffect, useRef } from "react";
+import { auth, db } from "./firebase";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from "firebase/auth";
+import {
+  doc, setDoc, getDoc, updateDoc,
+  collection, getDocs, orderBy, query, limit
+} from "firebase/firestore";
 
 // ============================================================
 // PIXEL FONT + GLOBAL STYLES (injected via style tag)
@@ -357,33 +368,52 @@ const AuthScreen = ({ onLogin }) => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // MOCK auth — replace with real Firebase
   const handleSubmit = async () => {
     setError(""); setLoading(true);
-    await new Promise(r => setTimeout(r, 800));
-    setLoading(false);
-
-    if (!email || !password) { setError("Email & password wajib diisi!"); return; }
-    if (mode === "register" && !name) { setError("Nama wajib diisi!"); return; }
-
-    // Check developer key
+    if (!email || !password) { setError("Email & password wajib diisi!"); setLoading(false); return; }
+    if (mode === "register" && !name) { setError("Nama wajib diisi!"); setLoading(false); return; }
     const isDev = devKey === DEVELOPER_KEY;
-
-    const userData = {
-      email,
-      name: mode === "register" ? name : email.split("@")[0],
-      isDev,
-      xp: 0,
-      level: 1,
-      streak: 0,
-      maxStreak: 0,
-      totalAnswered: 0,
-      totalCorrect: 0,
-      badges: [],
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
-    onLogin(userData);
+    try {
+      if (mode === "register") {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        const userData = {
+          uid: cred.user.uid, email, name, isDev,
+          xp: 0, level: 1, streak: 0, maxStreak: 0,
+          totalAnswered: 0, totalCorrect: 0,
+          badges: [], history: [],
+          createdAt: new Date().toISOString(),
+        };
+        await setDoc(doc(db, "users", cred.user.uid), userData);
+        onLogin(userData);
+      } else {
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        const snap = await getDoc(doc(db, "users", cred.user.uid));
+        if (snap.exists()) {
+          onLogin({ ...snap.data(), isDev: snap.data().isDev || isDev });
+        } else {
+          const userData = {
+            uid: cred.user.uid, email, name: email.split("@")[0], isDev,
+            xp: 0, level: 1, streak: 0, maxStreak: 0,
+            totalAnswered: 0, totalCorrect: 0,
+            badges: [], history: [],
+            createdAt: new Date().toISOString(),
+          };
+          await setDoc(doc(db, "users", cred.user.uid), userData);
+          onLogin(userData);
+        }
+      }
+    } catch (err) {
+      const msg = {
+        "auth/email-already-in-use": "Email sudah terdaftar!",
+        "auth/invalid-email": "Format email tidak valid!",
+        "auth/weak-password": "Password minimal 6 karakter!",
+        "auth/user-not-found": "Email tidak ditemukan!",
+        "auth/wrong-password": "Password salah!",
+        "auth/invalid-credential": "Email atau password salah!",
+      };
+      setError(msg[err.code] || "Terjadi kesalahan, coba lagi.");
+    }
+    setLoading(false);
   };
 
   return (
@@ -727,6 +757,77 @@ const QuizScreen = ({ user, jenjang, mapel, questions, onFinish, onXP }) => {
 };
 
 // ============================================================
+// ============================================================
+// LEADERBOARD SCREEN
+// ============================================================
+const LeaderboardScreen = ({ userData, accuracy }) => {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetch = async () => {
+      try {
+        const q = query(collection(db, "leaderboard"), orderBy("xp", "desc"), limit(20));
+        const snap = await getDocs(q);
+        setEntries(snap.docs.map(d => d.data()));
+      } catch(e) {}
+      setLoading(false);
+    };
+    fetch();
+  }, []);
+
+  const myRank = entries.findIndex(e => e.uid === userData.uid) + 1;
+
+  return (
+    <div style={{ minHeight: "100vh", padding: "24px 24px 120px", position: "relative", zIndex: 1 }}>
+      <div style={{ maxWidth: 600, margin: "0 auto" }}>
+        <div className="pixel" style={{ fontSize: 12, color: "var(--gold)", marginBottom: 32 }}>⊛ LEADERBOARD</div>
+        <div className="glass" style={{ padding: "20px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div className="pixel" style={{ fontSize: 7, color: "var(--cyan)" }}>SKOR KAMU</div>
+            <div className="vt" style={{ fontSize: 40, color: "var(--gold)" }}>{userData.xp} XP</div>
+            <div className="body-font" style={{ color: "var(--muted)", fontSize: 12 }}>Level {userData.level} · {accuracy}% akurasi</div>
+          </div>
+          {myRank > 0 && (
+            <div style={{ textAlign: "center" }}>
+              <div className="pixel" style={{ fontSize: 7, color: "var(--muted)" }}>RANK</div>
+              <div className="vt" style={{ fontSize: 52, color: "var(--magenta)" }}>#{myRank}</div>
+            </div>
+          )}
+        </div>
+        {loading ? (
+          <div className="glass" style={{ padding: 32, textAlign: "center" }}>
+            <div className="body-font" style={{ color: "var(--muted)" }}>Memuat leaderboard...</div>
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="glass" style={{ padding: 32, textAlign: "center" }}>
+            <div style={{ fontSize: 40 }}>🏆</div>
+            <div className="pixel" style={{ fontSize: 8, color: "var(--muted)", marginTop: 12 }}>BELUM ADA DATA</div>
+            <div className="body-font" style={{ color: "var(--muted)", marginTop: 8 }}>Mulai latihan untuk masuk leaderboard!</div>
+          </div>
+        ) : entries.map((e, i) => (
+          <div key={e.uid} className="glass" style={{
+            padding: "16px 20px", marginBottom: 8,
+            border: e.uid === userData.uid ? "1px solid var(--cyan)" : "1px solid var(--glass-border)",
+            display: "flex", alignItems: "center", gap: 16
+          }}>
+            <div className="vt" style={{ fontSize: 28, color: i === 0 ? "var(--gold)" : i === 1 ? "#C0C0C0" : i === 2 ? "#CD7F32" : "var(--muted)", minWidth: 36 }}>
+              #{i + 1}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="body-font" style={{ color: e.uid === userData.uid ? "var(--cyan)" : "var(--white)", fontWeight: 600 }}>
+                {e.name} {e.uid === userData.uid ? "(kamu)" : ""}
+              </div>
+              <div className="body-font" style={{ color: "var(--muted)", fontSize: 12 }}>Level {e.level} · {e.accuracy}% akurasi</div>
+            </div>
+            <div className="vt" style={{ fontSize: 28, color: "var(--gold)" }}>{e.xp} XP</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 // MAIN APP
 // ============================================================
 export default function App() {
@@ -770,7 +871,7 @@ export default function App() {
 
       if (streak >= 3) showToast(`🔥 ${streak}x streak! +5 bonus XP!`, "gold");
 
-      return {
+      const updated = {
         ...prev,
         xp: newXP,
         level: newLevel,
@@ -780,6 +881,24 @@ export default function App() {
         totalCorrect: newTotalCorrect,
         badges: [...prev.badges, ...earnedBadges],
       };
+
+      // Save to Firestore
+      if (prev.uid) {
+        updateDoc(doc(db, "users", prev.uid), {
+          xp: newXP, level: newLevel, streak: newStreak,
+          maxStreak: newMaxStreak, totalAnswered: newTotalAnswered,
+          totalCorrect: newTotalCorrect, badges: updated.badges,
+        }).catch(() => {});
+        // Update leaderboard
+        setDoc(doc(db, "leaderboard", prev.uid), {
+          uid: prev.uid, name: prev.name,
+          xp: newXP, level: newLevel,
+          accuracy: newTotalAnswered > 0 ? Math.round((newTotalCorrect / newTotalAnswered) * 100) : 0,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+
+      return updated;
     });
   };
 
@@ -789,7 +908,10 @@ export default function App() {
     setScreen("quiz");
   };
 
-  const handleLogout = () => { setUser(null); setUserData(null); setScreen("home"); };
+  const handleLogout = async () => {
+    await signOut(auth);
+    setUser(null); setUserData(null); setScreen("home");
+  };
 
   if (!user) return <><GlobalStyle /><FogLayer /><AuthScreen onLogin={handleLogin} /></>;
 
@@ -926,23 +1048,7 @@ export default function App() {
           </div>
         </div>
       ) : screen === "leaderboard" ? (
-        <div style={{ minHeight: "100vh", padding: "24px 24px 120px", position: "relative", zIndex: 1 }}>
-          <div style={{ maxWidth: 600, margin: "0 auto" }}>
-            <div className="pixel" style={{ fontSize: 12, color: "var(--gold)", marginBottom: 32 }}>⊛ LEADERBOARD</div>
-            <div className="glass" style={{ padding: "32px", textAlign: "center" }}>
-              <div style={{ fontSize: 48, marginBottom: 16 }}>🏆</div>
-              <div className="pixel" style={{ fontSize: 8, color: "var(--muted)" }}>COMING SOON</div>
-              <div className="body-font" style={{ color: "var(--muted)", marginTop: 12, lineHeight: 1.8 }}>
-                Leaderboard akan aktif setelah<br />Firebase terhubung & ada lebih banyak player!
-              </div>
-              <div style={{ marginTop: 24, padding: "20px", background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
-                <div className="pixel" style={{ fontSize: 7, color: "var(--cyan)", marginBottom: 8 }}>SKOR KAMU SAAT INI</div>
-                <div className="vt" style={{ fontSize: 52, color: "var(--gold)" }}>{userData.xp} XP</div>
-                <div className="body-font" style={{ color: "var(--muted)", marginTop: 4 }}>Level {userData.level} · {accuracy}% akurasi</div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <LeaderboardScreen userData={userData} accuracy={accuracy} />
       ) : (
         // HOME SCREEN
         <div style={{ minHeight: "100vh", padding: "24px 24px 120px", position: "relative", zIndex: 1 }}>
